@@ -1,0 +1,37 @@
+{
+  "name": "venatic",
+  "version": "0.1.0",
+  "description": "Threat hunting platform for SOC teams - DNS hostname baseline diffing, more modules to come",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "threat-hunting",
+    "soc",
+    "mssp",
+    "dns",
+    "security",
+    "baseline-diff"
+  ],
+  "bin": {
+    "venatic": "./dist/index.js",
+    "th": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "tsc",
+    "th": "tsx src/index.ts",
+    "test": "node --import tsx --test src/test/diff.test.ts"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "csv-parse": "^5.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
