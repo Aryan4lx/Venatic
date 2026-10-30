@@ -1,8 +1,11 @@
 import { createReadStream } from 'node:fs';
 import { parse } from 'csv-parse';
 
-const HOST_COL_NAMES = ['hostname', 'host', 'domain', 'query', 'dns_query', 'dnsquery', 'name', 'fqdn'];
+const HOST_COL_NAMES = ['hostname', 'host', 'domain', 'query', 'dns_query', 'dnsquery', 'name', 'fqdn', 'desthostname', 'destinationhostname'];
 const COUNT_COL_NAMES = ['count', 'counts', 'queries', 'query_count', 'querycount', 'hits', 'requests', 'request_count', 'total', 'total_queries'];
+
+/** Fold a header name for matching: "COUNT(Matched Events)" and "count_matched_events" both become "countmatchedevents". */
+const canonHeader = (s: string): string => s.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
 export interface HostRow {
   hostname: string;
@@ -36,9 +39,9 @@ export function resolveColumns(record: Record<string, unknown> | unknown[], opts
     return { hostKey: 0, countKey: record.length > 1 ? 1 : null };
   }
   const keys = Object.keys(record);
-  const lower = keys.map((k) => k.trim().toLowerCase());
+  const canonKeys = keys.map(canonHeader);
   const find = (name: string): number | undefined => {
-    const i = lower.indexOf(name.trim().toLowerCase());
+    const i = canonKeys.indexOf(canonHeader(name));
     return i === -1 ? undefined : i;
   };
 
@@ -64,6 +67,11 @@ export function resolveColumns(record: Record<string, unknown> | unknown[], opts
     }
   } else {
     countIdx = COUNT_COL_NAMES.map((n) => find(n)).find((i) => i !== undefined);
+    // SIEM exports name count columns things like "COUNT(Matched Events)"
+    if (countIdx === undefined) {
+      const i = canonKeys.findIndex((k) => k.startsWith('count'));
+      if (i !== -1) countIdx = i;
+    }
   }
 
   return { hostKey: keys[hostIdx], countKey: countIdx !== undefined ? keys[countIdx] : null };

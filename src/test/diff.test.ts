@@ -21,6 +21,13 @@ test('resolveColumns auto-detects host and count columns', () => {
   assert.equal(meta.countKey, 'hits');
 });
 
+test('resolveColumns handles SIEM-style headers with spaces and parens', () => {
+  // real-world export: "dest host name","COUNT(Matched Events)"
+  const meta = resolveColumns({ 'dest host name': 'x', 'COUNT(Matched Events)': 3 }, NO_OPTS);
+  assert.equal(meta.hostKey, 'dest host name');
+  assert.equal(meta.countKey, 'COUNT(Matched Events)');
+});
+
 test('resolveColumns honors explicit overrides and single-column fallback', () => {
   const meta = resolveColumns({ ServerName: 'x', blah: 1 }, { hostCol: 'ServerName' });
   assert.equal(meta.hostKey, 'ServerName');
