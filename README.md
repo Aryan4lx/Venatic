@@ -6,8 +6,8 @@ NEW, REMOVED, and CHANGED hostnames per customer. DNS baseline diffing is the
 first module - the tenant/dataset core is built to carry more log types and
 hunting modules later.
 
-Built for an MSSP: every dataset is tagged with a tenant (customer) name and
-diffs never mix customers. Storage is SQLite (built into Node, no external
+Multi-tenant by design: every dataset is tagged with a tenant (customer) name
+and diffs never mix tenants. Storage is SQLite (built into Node, no external
 database) and CSVs are streamed, so the same code paths handle 10 rows or 10
 million.
 
