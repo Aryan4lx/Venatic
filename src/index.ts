@@ -215,7 +215,7 @@ function cmdTenants(o: { db?: string }): void {
 }
 
 const program = new Command();
-program.name('th').description('ThreatHunt - DNS hostname baseline diffing for SOC threat hunting').version('0.1.0');
+program.name('venatic').description('venatic - threat hunting for SOC teams; DNS hostname baseline diffing').version('0.1.0');
 
 program
   .command('import')
