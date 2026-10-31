@@ -19,9 +19,13 @@ Normalized `events` schema (one wide table; every source feeds every hunt):
 - [x] `hunt volume` - bytes per host vs median (`--by src|dst`)
 - [x] `hunt dnstunnel` - unique subdomains, NXDOMAIN ratio, label length/entropy,
       TXT share per base domain -> score 0-100
-- [ ] web anomalies hunt (404 bursts, non-browser UAs, traversal/cmd= patterns) - needs
-      samples from user's web server logs
-- [ ] FortiGate log parser - needs samples from user
+- [x] SIEM wrapper-CSV parser (`import-siem`): `Raw Event Log` column carrying
+      FortiOS KV lines (traffic, utm/dns) or IIS W3C lines; auto-detect per row,
+      malformed-quote tolerant, timestamp built from date/time/timezone
+- [x] `.arpa` reverse-lookup zones excluded from `hunt dnstunnel` (PTR floods
+      the unique-name counter but can't carry tunnel data)
+- [ ] web anomalies hunt (404 bursts, non-browser UAs, traversal/cmd= patterns) -
+      parser exists (IIS), hunt design pending review of the imported data
 - [ ] `venatic diff` for event datasets: first-seen destinations vs baseline (extend
       hosts-diff to `SELECT DISTINCT dst_host` on events)
 

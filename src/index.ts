@@ -23,6 +23,7 @@ import {
 } from './store.js';
 import { renderDiffTerminal } from './report.js';
 import { readZeek } from './zeek.js';
+import { readSiem } from './siem.js';
 import { EventWriter, type Row } from './store.js';
 import {
   huntBeaconing,
@@ -199,23 +200,24 @@ function parseDuration(s: string): number {
   return Math.round(parseFloat(m[1]) * mult);
 }
 
-async function importZeek(target: string, o: ImportOpts): Promise<void> {
+/** Shared atomic events import: temp dataset -> reader -> row_count -> label swap. */
+async function importEvents(target: string, o: ImportOpts, defaultLabel: string, read: (writer: EventWriter) => Promise<string>): Promise<void> {
   const tenant = need(o.tenant, '--tenant <name> is required');
   const db = openDb(resolveDbPath(o.db));
   let dataset: Dataset | undefined;
   try {
-    const label = o.label ?? basename(target).replace(/\.(log|csv)(\.gz)?$/i, '');
+    const label = o.label ?? defaultLabel;
     const existing = getDataset(db, tenant, label);
     if (existing && !o.replace) {
       throw new Error(`dataset '${label}' already exists for tenant '${tenant}' (imported ${existing.imported_at}). Use --replace to overwrite.`);
     }
     dataset = createDataset(db, tenant, `__import_tmp_${process.pid}_${Date.now()}`, 'events');
     const writer = new EventWriter(db, dataset.id);
-    const results = await readZeek(target, (e) => writer.add(e));
-    if (results.length === 0) throw new Error(`no Zeek log files (*.log, *.log.gz) found in ${target}`);
-    writer.flush();
+    const summary = await read(writer);
+    writer.flush(); // otherwise the final buffered batch never reaches the table
     const total = db.prepare('SELECT COUNT(*) AS n FROM events WHERE dataset_id = ?').get(dataset.id) as { n: number | bigint };
     dataset.row_count = Number(total.n);
+    if (dataset.row_count === 0) throw new Error(`no usable events found in ${target}`);
     db.prepare('UPDATE datasets SET row_count = ? WHERE id = ?').run(dataset.row_count, dataset.id);
     db.exec('BEGIN');
     try {
@@ -228,19 +230,37 @@ async function importZeek(target: string, o: ImportOpts): Promise<void> {
     }
     dataset.label = label;
 
-    console.log(`imported ${dataset.row_count} events (${writer.rowsSeen} rows) from ${target}`);
-    const byKind = new Map<string, number>();
-    for (const r of results) byKind.set(r.kind, (byKind.get(r.kind) ?? 0) + r.rows);
-    const parts = [...byKind.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}: ${v}`).join(', ');
-    console.log(`tenant '${tenant}', dataset '${label}' | events by log type - ${parts || 'none'}`);
-    const unsupported = [...new Set(results.filter((r) => !['conn', 'dns', 'http'].includes(r.kind)).map((r) => r.kind))];
-    if (unsupported.length) console.log(`skipped unsupported log types: ${unsupported.join(', ')}`);
+    console.log(`imported ${dataset.row_count} events from ${target}`);
+    console.log(`tenant '${tenant}', dataset '${label}' | ${summary}`);
   } catch (err) {
     if (dataset) deleteDataset(db, dataset.id);
     throw err;
   } finally {
     db.close();
   }
+}
+
+async function importZeek(target: string, o: ImportOpts): Promise<void> {
+  const label = o.label ?? basename(target).replace(/\.(log|csv)(\.gz)?$/i, '');
+  await importEvents(target, o, label, async (writer) => {
+    const results = await readZeek(target, (e) => writer.add(e));
+    if (results.length === 0) throw new Error(`no Zeek log files (*.log, *.log.gz) found in ${target}`);
+    const byKind = new Map<string, number>();
+    for (const r of results) byKind.set(r.kind, (byKind.get(r.kind) ?? 0) + r.rows);
+    const parts = [...byKind.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}: ${v}`).join(', ');
+    const unsupported = [...new Set(results.filter((r) => !['conn', 'dns', 'http'].includes(r.kind)).map((r) => r.kind))];
+    if (unsupported.length) console.log(`skipped unsupported log types: ${unsupported.join(', ')}`);
+    return `events by log type - ${parts || 'none'}`;
+  });
+}
+
+async function importSiem(file: string, o: ImportOpts): Promise<void> {
+  const label = o.label ?? basename(file).replace(/\.csv$/i, '');
+  await importEvents(file, o, label, async (writer) => {
+    const res = await readSiem(file, (e) => writer.add(e));
+    if (res.skipped > 0) console.log(`skipped ${res.skipped} rows (empty or unsupported raw log types)`);
+    return `fortinet: ${res.fortinet}, iis: ${res.iis}`;
+  });
 }
 
 interface HuntOpts {
@@ -397,6 +417,16 @@ program
   .option('--by <side>', 'volume: rank by src or dst hosts (default src)')
   .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
   .action((name: string, o: HuntOpts) => cmdHunt(name, o));
+
+program
+  .command('import-siem')
+  .description('import a SIEM CSV export whose "Raw Event Log" column carries FortiOS (traffic, utm/dns) or IIS W3C lines')
+  .argument('<file>', 'SIEM CSV export with a Raw Event Log column')
+  .requiredOption('-t, --tenant <name>', 'tenant (customer) name')
+  .option('-l, --label <name>', 'dataset label (default: file name without extension)')
+  .option('--replace', 'overwrite an existing dataset with the same label', false)
+  .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
+  .action((file: string, o: ImportOpts) => importSiem(file, o));
 
 program
   .command('list')

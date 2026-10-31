@@ -211,7 +211,8 @@ export function huntVolume(db: DatabaseSync, datasetId: number, opts: { by?: 'sr
     ip: String(r.ip),
     bytes: Number(r.bytes),
     conns: Number(r.conns),
-    medianRatio: median > 0 ? Number(r.bytes) / median : 0,
+    // median 0 (e.g. deny-heavy firewalls) -> Infinity for any traffic at all
+    medianRatio: median > 0 ? Number(r.bytes) / median : Number(r.bytes) > 0 ? Infinity : 0,
   }));
 }
 
@@ -220,7 +221,8 @@ export function renderVolume(f: VolumeFinding[], o: HuntOpts): void {
   console.log(`top hosts by transferred bytes: ${f.length}\n`);
   for (const x of f) {
     const flag = x.medianRatio >= 10 ? c('red', '!!') : x.medianRatio >= 3 ? c('yellow', '! ') : '  ';
-    console.log(`${flag} ${x.ip.padEnd(18)} ${formatBytes(x.bytes).padStart(12)}  ${c('gray', `${x.conns} conns, ${x.medianRatio.toFixed(1)}x median`)}`);
+    const ratio = x.medianRatio === Infinity ? 'infinity x median' : `${x.medianRatio.toFixed(1)}x median`;
+    console.log(`${flag} ${x.ip.padEnd(18)} ${formatBytes(x.bytes).padStart(12)}  ${c('gray', `${x.conns} conns, ${ratio}`)}`);
   }
 }
 
@@ -255,6 +257,8 @@ export function huntDnsTunnel(db: DatabaseSync, datasetId: number, opts: { minCo
   const bases = new Map<string, { c: number; nx: number; txt: number; u: number; maxLabel: number; entSum: number }>();
   for (const r of perQname) {
     const q = String(r.q).toLowerCase();
+    // reverse-lookup zones (PTR) create huge unique-name counts but can't carry tunnel data
+    if (q.endsWith('.arpa')) continue;
     const b = baseDomain(q);
     const cnt = Number(r.c);
     let st = bases.get(b);

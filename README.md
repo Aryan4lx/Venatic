@@ -76,7 +76,28 @@ th hunt dnstunnel -t acme --min-conns 50
 Scores are 0-100 and are triage aids, not verdicts: beaconing blends interval
 regularity (CV of gaps between connections), payload-size regularity, and
 connection count; DNS tunneling blends unique-subdomain count, label entropy,
-NXDOMAIN ratio, and TXT share. Always verify a candidate before escalating.
+NXDOMAIN ratio, and TXT share (reverse-lookup `.arpa` zones are excluded).
+Always verify a candidate before escalating.
+
+## SIEM CSV exports (`import-siem`)
+
+Many SIEMs export raw events as a wrapper CSV where one column (`Raw Event
+Log`) contains the original log line. Venatic parses those rows directly:
+
+- **FortiOS** KV lines: `type=traffic` (src/dst IP+port, proto, duration,
+  bytes) and `type=utm subtype=dns` (qname, qtype, rcode). The KV tokenizer
+  survives malformed quotes seen in real exports; timestamps use the export's
+  `date`/`time`/`tz` fields.
+- **IIS / W3C** lines (detected by the `IISWebLog` marker): method, URI,
+  status, user agent, cs-host, bytes, time-taken.
+
+```sh
+th import-siem export.csv -t acme -l fortigate-week42
+```
+
+Rows that are empty or carry an unsupported log type are counted and
+reported, never fatal. Note: SIEM exports are often capped (e.g. 10,000
+rows) - check the export footer before drawing conclusions.
 
 ## CSV format
 
