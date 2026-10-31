@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Argument } from 'commander';
 import { basename } from 'node:path';
 import { createWriteStream } from 'node:fs';
 import { resolveDbPath } from './config.js';
@@ -22,6 +22,19 @@ import {
   type DiffCounts,
 } from './store.js';
 import { renderDiffTerminal } from './report.js';
+import { readZeek } from './zeek.js';
+import { EventWriter, type Row } from './store.js';
+import {
+  huntBeaconing,
+  renderBeaconing,
+  huntLongConns,
+  renderLongConns,
+  huntVolume,
+  renderVolume,
+  huntDnsTunnel,
+  renderDnsTunnel,
+  huntHeader,
+} from './hunts.js';
 
 interface CommonOpts {
   db?: string;
@@ -179,6 +192,117 @@ async function writeCsvExport(path: string, db: import('node:sqlite').DatabaseSy
   console.log(`wrote ${n} rows (header + ${n - 1} diff entries) to ${path}`);
 }
 
+function parseDuration(s: string): number {
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/.exec(s.trim());
+  if (!m) throw new Error(`invalid duration '${s}' (examples: 90m, 2h, 600s)`);
+  const mult = { ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] ?? 'ms']!;
+  return Math.round(parseFloat(m[1]) * mult);
+}
+
+async function importZeek(target: string, o: ImportOpts): Promise<void> {
+  const tenant = need(o.tenant, '--tenant <name> is required');
+  const db = openDb(resolveDbPath(o.db));
+  let dataset: Dataset | undefined;
+  try {
+    const label = o.label ?? basename(target).replace(/\.(log|csv)(\.gz)?$/i, '');
+    const existing = getDataset(db, tenant, label);
+    if (existing && !o.replace) {
+      throw new Error(`dataset '${label}' already exists for tenant '${tenant}' (imported ${existing.imported_at}). Use --replace to overwrite.`);
+    }
+    dataset = createDataset(db, tenant, `__import_tmp_${process.pid}_${Date.now()}`, 'events');
+    const writer = new EventWriter(db, dataset.id);
+    const results = await readZeek(target, (e) => writer.add(e));
+    if (results.length === 0) throw new Error(`no Zeek log files (*.log, *.log.gz) found in ${target}`);
+    writer.flush();
+    const total = db.prepare('SELECT COUNT(*) AS n FROM events WHERE dataset_id = ?').get(dataset.id) as { n: number | bigint };
+    dataset.row_count = Number(total.n);
+    db.prepare('UPDATE datasets SET row_count = ? WHERE id = ?').run(dataset.row_count, dataset.id);
+    db.exec('BEGIN');
+    try {
+      if (existing) deleteDataset(db, existing.id);
+      db.prepare('UPDATE datasets SET label = ? WHERE id = ?').run(label, dataset.id);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    dataset.label = label;
+
+    console.log(`imported ${dataset.row_count} events (${writer.rowsSeen} rows) from ${target}`);
+    const byKind = new Map<string, number>();
+    for (const r of results) byKind.set(r.kind, (byKind.get(r.kind) ?? 0) + r.rows);
+    const parts = [...byKind.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}: ${v}`).join(', ');
+    console.log(`tenant '${tenant}', dataset '${label}' | events by log type - ${parts || 'none'}`);
+    const unsupported = [...new Set(results.filter((r) => !['conn', 'dns', 'http'].includes(r.kind)).map((r) => r.kind))];
+    if (unsupported.length) console.log(`skipped unsupported log types: ${unsupported.join(', ')}`);
+  } catch (err) {
+    if (dataset) deleteDataset(db, dataset.id);
+    throw err;
+  } finally {
+    db.close();
+  }
+}
+
+interface HuntOpts {
+  tenant?: string;
+  label?: string;
+  json?: boolean;
+  limit?: string;
+  db?: string;
+  minConns?: string;
+  maxCv?: string;
+  minInterval?: string;
+  minDuration?: string;
+  by?: string;
+}
+
+async function cmdHunt(name: string, o: HuntOpts): Promise<void> {
+  const tenant = need(o.tenant, '--tenant <name> is required');
+  const db = openDb(resolveDbPath(o.db));
+  try {
+    const ds = o.label
+      ? need(getDataset(db, tenant, o.label), `no dataset '${o.label}' for tenant '${tenant}' (see: th list -t ${tenant})`)
+      : need(latestDataset(db, tenant, 'events'), `tenant '${tenant}' has no event datasets - import Zeek logs with 'th import-zeek' first`);
+    if (ds.kind !== 'events') throw new Error(`dataset '${ds.label}' is a DNS baseline (kind=dns) - hunts run on event data imported with 'th import-zeek'`);
+    const limit = o.limit ? parseInt(o.limit, 10) : 25;
+    const opts = { limit, json: o.json === true };
+    huntHeader(db, tenant, ds.id, `hunt: ${name}`);
+    switch (name) {
+      case 'beaconing': {
+        const findings = huntBeaconing(db, ds.id, {
+          minConns: o.minConns ? parseInt(o.minConns, 10) : undefined,
+          maxCv: o.maxCv ? parseFloat(o.maxCv) : undefined,
+          minIntervalMs: o.minInterval ? parseDuration(o.minInterval) : undefined,
+          limit,
+        });
+        renderBeaconing(findings, opts);
+        break;
+      }
+      case 'long-conns': {
+        const findings = huntLongConns(db, ds.id, {
+          minDurationMs: o.minDuration ? parseDuration(o.minDuration) : undefined,
+          limit,
+        });
+        renderLongConns(findings, opts);
+        break;
+      }
+      case 'volume': {
+        const by = o.by ?? 'src';
+        if (by !== 'src' && by !== 'dst') throw new Error("--by must be 'src' or 'dst'");
+        renderVolume(huntVolume(db, ds.id, { by, limit }), opts);
+        break;
+      }
+      case 'dnstunnel':
+        renderDnsTunnel(huntDnsTunnel(db, ds.id, { minConns: o.minConns ? parseInt(o.minConns, 10) : undefined, limit }), opts);
+        break;
+      default:
+        throw new Error(`unknown hunt '${name}'`);
+    }
+  } finally {
+    db.close();
+  }
+}
+
 function cmdList(o: { tenant?: string; db?: string }): void {
   const db = openDb(resolveDbPath(o.db));
   try {
@@ -193,7 +317,7 @@ function cmdList(o: { tenant?: string; db?: string }): void {
         currentTenant = d.tenant;
         console.log(`${d.tenant}:`);
       }
-      console.log(`  ${d.label.padEnd(30)} ${d.row_count.toLocaleString().padStart(9)} hostnames  imported ${d.imported_at}`);
+      console.log(`  ${d.label.padEnd(30)} ${d.row_count.toLocaleString().padStart(9)} ${d.kind === 'events' ? 'events    ' : 'hostnames '} imported ${d.imported_at}`);
     }
   } finally {
     db.close();
@@ -247,6 +371,32 @@ program
   .option('--limit <n>', 'rows shown per section in terminal output', '50')
   .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
   .action((o: DiffOpts) => cmdDiff(o));
+
+program
+  .command('import-zeek')
+  .description('import Zeek TSV logs (conn/dns/http, raw or .gz; file or directory) as an events dataset')
+  .argument('<target>', 'Zeek .log/.log.gz file or a directory containing them')
+  .requiredOption('-t, --tenant <name>', 'tenant (customer) name')
+  .option('-l, --label <name>', 'dataset label (default: file/dir name without extension)')
+  .option('--replace', 'overwrite an existing dataset with the same label', false)
+  .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
+  .action((target: string, o: ImportOpts) => importZeek(target, o));
+
+program
+  .command('hunt')
+  .description('run a detection hunt over an events dataset (beaconing, long-conns, volume, dnstunnel)')
+  .addArgument(new Argument('<name>', 'which hunt to run').choices(['beaconing', 'long-conns', 'volume', 'dnstunnel']))
+  .requiredOption('-t, --tenant <name>', 'tenant (customer) name')
+  .option('-l, --label <name>', 'events dataset label (default: most recent events dataset)')
+  .option('--json', 'print findings as JSON to stdout', false)
+  .option('--limit <n>', 'max findings to show', '25')
+  .option('--min-conns <n>', 'min connections per pair/domain (beaconing, dnstunnel)')
+  .option('--max-cv <x>', 'beaconing: max interval coefficient of variation (default 0.2; lower = stricter)')
+  .option('--min-interval <dur>', 'beaconing: ignore pairs with mean interval below this (e.g. 500ms, 5s; default 1s)')
+  .option('--min-duration <dur>', 'long-conns: minimum duration (e.g. 90m, 2h; default 1h)')
+  .option('--by <side>', 'volume: rank by src or dst hosts (default src)')
+  .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
+  .action((name: string, o: HuntOpts) => cmdHunt(name, o));
 
 program
   .command('list')

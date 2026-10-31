@@ -22,7 +22,7 @@
   "scripts": {
     "build": "tsc",
     "th": "tsx src/index.ts",
-    "test": "node --import tsx --test src/test/diff.test.ts"
+    "test": "node --import tsx --test src/test/"
   },
   "dependencies": {
     "commander": "^14.0.2",

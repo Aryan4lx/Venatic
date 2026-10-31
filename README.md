@@ -1,14 +1,14 @@
 # venatic
 
-Threat hunting for SOC teams. Import the DNS query logs your analysts export
-as CSV, then diff each new export against a stored baseline to instantly see
-NEW, REMOVED, and CHANGED hostnames per customer. DNS baseline diffing is the
-first module - the tenant/dataset core is built to carry more log types and
-hunting modules later.
+Threat hunting for SOC teams. Import DNS query logs your analysts export as
+CSV, then diff each new export against a stored baseline to instantly see
+NEW, REMOVED, and CHANGED hostnames per customer. Import Zeek TSV logs
+(conn/dns/http) and run network hunts: beaconing, long connections, volume
+outliers, and DNS tunneling/DGA detection.
 
 Multi-tenant by design: every dataset is tagged with a tenant (customer) name
-and diffs never mix tenants. Storage is SQLite (built into Node, no external
-database) and CSVs are streamed, so the same code paths handle 10 rows or 10
+and tenants never mix. Storage is SQLite (built into Node, no external
+database) and logs are streamed, so the same code paths handle 10 rows or 10
 million.
 
 ## Setup
@@ -49,6 +49,34 @@ th tenants
 
 Terminal output truncates each section (default 50 rows, `--limit N` to
 raise). `--json` / `--csv` always contain the complete diff.
+
+## Zeek logs & hunts
+
+Import Zeek TSV logs (raw or .gz, a single file or a whole directory,
+recursively). Currently supported log types: `conn`, `dns`, `http` (others
+are skipped with a note).
+
+```sh
+# import a directory of zeek logs as an events dataset
+th import-zeek C:\zeek\logs -t acme -l zeek-jan1
+
+# run hunts over the most recent events dataset (or pick one with -l <label>)
+th hunt beaconing -t acme          # regular-interval check-ins to one host
+th hunt long-conns -t acme         # connections open for hours (default >= 1h)
+th hunt volume -t acme             # hosts moving the most bytes, vs median
+th hunt dnstunnel -t acme          # tunneling / DGA per base domain
+
+# every hunt supports --json and --limit, plus per-hunt tuning:
+th hunt beaconing -t acme --min-conns 10 --max-cv 0.1 --min-interval 30s
+th hunt long-conns -t acme --min-duration 2h
+th hunt volume -t acme --by dst
+th hunt dnstunnel -t acme --min-conns 50
+```
+
+Scores are 0-100 and are triage aids, not verdicts: beaconing blends interval
+regularity (CV of gaps between connections), payload-size regularity, and
+connection count; DNS tunneling blends unique-subdomain count, label entropy,
+NXDOMAIN ratio, and TXT share. Always verify a candidate before escalating.
 
 ## CSV format
 

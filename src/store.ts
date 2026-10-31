@@ -6,6 +6,27 @@ export interface Dataset {
   label: string;
   imported_at: string;
   row_count: number;
+  kind: string; // 'dns' (host baselines) or 'events' (network flows)
+}
+
+/** One normalized network event (flow, DNS query, or HTTP request). */
+export interface EventRow {
+  ts?: number | null; // epoch milliseconds
+  src_ip?: string | null;
+  src_port?: number | null;
+  dst_ip?: string | null;
+  dst_port?: number | null;
+  dst_host?: string | null; // dns query name / http Host header; null for plain ip flows
+  proto?: string | null;
+  duration_ms?: number | null;
+  bytes_sent?: number | null;
+  bytes_recv?: number | null;
+  rcode?: string | null; // dns
+  qtype?: string | null; // dns
+  method?: string | null; // http
+  uri?: string | null; // http
+  status?: number | null; // http
+  user_agent?: string | null; // http
 }
 
 export interface HostCounts {
@@ -45,11 +66,39 @@ export function openDb(path: string): DatabaseSync {
       count INTEGER,
       PRIMARY KEY (dataset_id, hostname)
     ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY,
+      dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+      ts INTEGER,
+      src_ip TEXT,
+      src_port INTEGER,
+      dst_ip TEXT,
+      dst_port INTEGER,
+      dst_host TEXT,
+      proto TEXT,
+      duration_ms INTEGER,
+      bytes_sent INTEGER,
+      bytes_recv INTEGER,
+      rcode TEXT,
+      qtype TEXT,
+      method TEXT,
+      uri TEXT,
+      status INTEGER,
+      user_agent TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_events_pair ON events(dataset_id, src_ip, dst_ip);
+    CREATE INDEX IF NOT EXISTS idx_events_host ON events(dataset_id, dst_host);
+    CREATE INDEX IF NOT EXISTS idx_events_ts ON events(dataset_id, ts);
   `);
+  // migration for pre-Phase2 databases: datasets.kind
+  const cols = db.prepare('PRAGMA table_info(datasets)').all() as Row[];
+  if (!cols.some((col) => col.name === 'kind')) {
+    db.exec("ALTER TABLE datasets ADD COLUMN kind TEXT NOT NULL DEFAULT 'dns'");
+  }
   return db;
 }
 
-type Row = Record<string, unknown>;
+export type Row = Record<string, unknown>;
 
 function toDataset(row: Row | undefined): Dataset | undefined {
   if (!row) return undefined;
@@ -59,6 +108,7 @@ function toDataset(row: Row | undefined): Dataset | undefined {
     label: String(row.label),
     imported_at: String(row.imported_at),
     row_count: Number(row.row_count),
+    kind: String(row.kind ?? 'dns'),
   };
 }
 
@@ -66,24 +116,30 @@ function num(row: Row | undefined, key: string): number {
   return Number((row ?? {})[key] ?? 0);
 }
 
+function datasetCols(): string {
+  return 'id, tenant, label, imported_at, row_count, kind';
+}
+
 export function getDataset(db: DatabaseSync, tenant: string, label: string): Dataset | undefined {
-  const row = db.prepare('SELECT id, tenant, label, imported_at, row_count FROM datasets WHERE tenant = ? AND label = ?').get(tenant, label) as Row | undefined;
+  const row = db.prepare(`SELECT ${datasetCols()} FROM datasets WHERE tenant = ? AND label = ?`).get(tenant, label) as Row | undefined;
   return toDataset(row);
 }
 
-export function latestDataset(db: DatabaseSync, tenant: string): Dataset | undefined {
-  const row = db.prepare('SELECT id, tenant, label, imported_at, row_count FROM datasets WHERE tenant = ? ORDER BY imported_at DESC, id DESC LIMIT 1').get(tenant) as Row | undefined;
+export function latestDataset(db: DatabaseSync, tenant: string, kind?: string): Dataset | undefined {
+  const sql = `SELECT ${datasetCols()} FROM datasets WHERE tenant = ?${kind ? ' AND kind = ?' : ''} ORDER BY imported_at DESC, id DESC LIMIT 1`;
+  const row = (kind ? db.prepare(sql).get(tenant, kind) : db.prepare(sql).get(tenant)) as Row | undefined;
   return toDataset(row);
 }
 
-export function createDataset(db: DatabaseSync, tenant: string, label: string): Dataset {
+export function createDataset(db: DatabaseSync, tenant: string, label: string, kind = 'dns'): Dataset {
   const at = new Date().toISOString();
-  const res = db.prepare('INSERT INTO datasets (tenant, label, imported_at, row_count) VALUES (?, ?, ?, 0)').run(tenant, label, at);
-  return { id: Number(res.lastInsertRowid), tenant, label, imported_at: at, row_count: 0 };
+  const res = db.prepare('INSERT INTO datasets (tenant, label, imported_at, row_count, kind) VALUES (?, ?, ?, 0, ?)').run(tenant, label, at, kind);
+  return { id: Number(res.lastInsertRowid), tenant, label, imported_at: at, row_count: 0, kind };
 }
 
 export function deleteDataset(db: DatabaseSync, id: number): void {
   db.prepare('DELETE FROM hosts WHERE dataset_id = ?').run(id);
+  db.prepare('DELETE FROM events WHERE dataset_id = ?').run(id);
   db.prepare('DELETE FROM datasets WHERE id = ?').run(id);
 }
 
@@ -95,7 +151,7 @@ export function refreshRowCount(db: DatabaseSync, id: number): number {
 }
 
 export function listDatasets(db: DatabaseSync, tenant?: string): Dataset[] {
-  const sql = 'SELECT id, tenant, label, imported_at, row_count FROM datasets' + (tenant ? ' WHERE tenant = ?' : '') + ' ORDER BY tenant, imported_at DESC, id DESC';
+  const sql = `SELECT ${datasetCols()} FROM datasets${tenant ? ' WHERE tenant = ?' : ''} ORDER BY tenant, imported_at DESC, id DESC`;
   const rows = (tenant ? db.prepare(sql).all(tenant) : db.prepare(sql).all()) as Row[];
   return rows.map((r) => toDataset(r)!);
 }
@@ -135,6 +191,50 @@ export class HostWriter {
     this.db.exec('BEGIN');
     try {
       for (const [hostname, count] of rows) this.stmt.run(this.datasetId, hostname, count);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  get rowsSeen(): number {
+    return this.seen;
+  }
+}
+
+/** Buffered writer for events datasets - same batching pattern as HostWriter. */
+export class EventWriter {
+  private stmt: StatementSync;
+  private batch: EventRow[] = [];
+  private seen = 0;
+
+  constructor(private db: DatabaseSync, private datasetId: number) {
+    this.stmt = db.prepare(
+      `INSERT INTO events (dataset_id, ts, src_ip, src_port, dst_ip, dst_port, dst_host, proto, duration_ms, bytes_sent, bytes_recv, rcode, qtype, method, uri, status, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+  }
+
+  add(row: EventRow): void {
+    this.batch.push(row);
+    this.seen++;
+    if (this.batch.length >= 5000) this.flush();
+  }
+
+  flush(): void {
+    if (this.batch.length === 0) return;
+    const rows = this.batch;
+    this.batch = [];
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) {
+        this.stmt.run(
+          this.datasetId, r.ts ?? null, r.src_ip ?? null, r.src_port ?? null, r.dst_ip ?? null, r.dst_port ?? null,
+          r.dst_host ?? null, r.proto ?? null, r.duration_ms ?? null, r.bytes_sent ?? null, r.bytes_recv ?? null,
+          r.rcode ?? null, r.qtype ?? null, r.method ?? null, r.uri ?? null, r.status ?? null, r.user_agent ?? null,
+        );
+      }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
