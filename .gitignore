@@ -5,3 +5,4 @@ dist/
 .env
 *.db
 *.db-*
+!fixtures/zeek/*.log
