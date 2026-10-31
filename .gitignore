@@ -6,3 +6,6 @@ dist/
 *.db
 *.db-*
 !fixtures/zeek/*.log
+
+# local sample logs - real customer data, never commit
+/samples/
