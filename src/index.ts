@@ -24,6 +24,7 @@ import {
 import { renderDiffTerminal } from './report.js';
 import { readZeek } from './zeek.js';
 import { readSiem } from './siem.js';
+import { startServe } from './web/server.js';
 import { EventWriter, type Row } from './store.js';
 import {
   huntBeaconing,
@@ -440,6 +441,19 @@ program
   .description('list tenants and their dataset totals')
   .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
   .action((o: { db?: string }) => cmdTenants(o));
+
+program
+  .command('serve')
+  .description('start the local web dashboard (http://127.0.0.1:<port>)')
+  .option('-p, --port <n>', 'port to listen on', '8422')
+  .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
+  .option('--no-open', "don't open the browser automatically")
+  .action(async (o: { port: string; db?: string }) => {
+    const port = Number(o.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid port '${o.port}'`);
+    const { url } = await startServe({ db: o.db, port });
+    console.log(`venatic dashboard running at ${url} (Ctrl+C to stop)`);
+  });
 
 program.parseAsync().catch((err: unknown) => {
   console.error(String(err instanceof Error ? err.message : err));

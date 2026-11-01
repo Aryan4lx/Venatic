@@ -33,11 +33,17 @@ Hunt conventions: every hunt is a pure function `(db, datasetId, opts) -> findin
 plus a renderer; `--json` on every hunt for SIEM piping; allow-listing per tenant
 comes before Phase 3.
 
-## Phase 3 - GUI (after CLI hunts settle)
+## Phase 3 - GUI (shipped)
 
-- `venatic serve` - Fastify + React/Vite, localhost-only by default
-- tenant switcher, dataset browser, diff drill-down, hunt dashboard (Chart.js)
-- same engine as the CLI; no separate logic
+- [x] `venatic serve` - plain node:http dashboard on 127.0.0.1 (no framework,
+      no build chain; single-file vanilla JS frontend + Chart.js served
+      locally so it works on air-gapped networks)
+- [x] tenant switcher, dataset browser, DNS diff view, all four hunts with
+      score bars and a top-talkers chart
+- [x] JSON API (`/api/tenants`, `/api/datasets`, `/api/diff`, `/api/hunt`)
+      usable without the UI
+- [ ] drill-down: click a candidate to see the raw events behind it
+- [ ] per-hunt severity thresholds / allow-list editing in the UI
 
 ## Phase 4 - scale & workflow
 

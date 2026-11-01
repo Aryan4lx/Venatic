@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>venatic - threat hunting</title>
+<script src="/chart.umd.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #e6edf3; --muted: #8b949e;
+    --accent: #58a6ff; --red: #f85149; --yellow: #d29922; --green: #3fb950; --orange: #db6d28;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: 1px; }
+  header h1 span { color: var(--accent); }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 20px 60px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0; }
+  select, button {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font: inherit;
+  }
+  select:focus, button:focus { outline: 1px solid var(--accent); }
+  button { cursor: pointer; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.primary:hover { background: #388bfd; }
+  button:hover { border-color: var(--accent); }
+  h2 { font-size: 15px; margin: 26px 0 8px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+  .chip { border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px; background: var(--panel); min-width: 110px; }
+  .chip b { display: block; font-size: 20px; }
+  .chip small { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
+  .chip.new b { color: var(--red); } .chip.removed b { color: var(--muted); }
+  .chip.changed b { color: var(--yellow); } .chip.unchanged b { color: var(--green); }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 4px; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { position: relative; background: #21262d; border-radius: 3px; height: 14px; width: 130px; overflow: hidden; }
+  .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
+  .bar.hi i { background: var(--red); } .bar.md i { background: var(--yellow); } .bar.lo i { background: #2ea04366; }
+  .up { color: var(--red); } .down { color: var(--green); }
+  .meta { color: var(--muted); font-size: 12px; margin: 4px 0; }
+  .empty { color: var(--muted); padding: 14px 0; font-style: italic; }
+  .error { color: var(--red); padding: 10px 14px; border: 1px solid var(--red); border-radius: 6px; background: #f8514911; margin: 10px 0; }
+  details { margin: 10px 0; }
+  summary { cursor: pointer; color: var(--muted); }
+  #volumeChart { max-height: 320px; margin: 10px 0; }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>venatic<span>.</span></h1>
+  <div class="sub">threat hunting for SOC teams</div>
+  <div style="margin-left:auto; display:flex; gap:8px; align-items:center">
+    <span class="sub">tenant</span>
+    <select id="tenant"></select>
+  </div>
+</header>
+<main>
+  <div class="toolbar">
+    <button class="primary" id="runAll">Run all hunts</button>
+    <span class="hint">runs beaconing, long connections, volume and DNS tunneling on the selected events dataset</span>
+  </div>
+
+  <h2>DNS baseline diff</h2>
+  <div class="toolbar">
+    <span class="hint">baseline</span> <select id="diffFrom"></select>
+    <span class="hint">&rarr; incoming</span> <select id="diffTo"></select>
+    <button id="runDiff" class="primary">Diff</button>
+  </div>
+  <div id="diffOut"></div>
+
+  <div class="toolbar" style="margin-top:28px">
+    <span class="hint">events dataset</span> <select id="huntDs"></select>
+  </div>
+  <div id="huntOut"></div>
+</main>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const state = { tenant: null, datasets: [] };
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+async function api(path, params = {}) {
+  const qs = new URLSearchParams({ tenant: state.tenant, ...params }).toString();
+  const res = await fetch(`${path}?${qs}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n >= 100 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
+function fmtDuration(ms) {
+  const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), s = Math.floor((ms % 60000) / 1000);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+function age(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return `${Math.round(mins / 1440)}d ago`;
+}
+function scoreBar(v) {
+  const cls = v >= 70 ? 'hi' : v >= 40 ? 'md' : 'lo';
+  return `<span class="bar ${cls}"><i style="width:${Math.min(100, v)}%"></i></span> ${v}`;
+}
+function dsMeta(d) { return `${esc(d.label)} (${d.row_count.toLocaleString()} rows, imported ${age(d.imported_at)})`; }
+function fillSelect(sel, items, pick) {
+  sel.innerHTML = '';
+  for (const d of items) {
+    const o = document.createElement('option');
+    o.value = d.label;
+    o.textContent = `${d.label} - ${d.row_count.toLocaleString()} rows, ${age(d.imported_at)}`;
+    sel.appendChild(o);
+  }
+  sel.disabled = items.length === 0;
+  if (pick !== undefined && items.length) sel.value = pick(items);
+}
+function showError(container, err) {
+  container.innerHTML = `<div class="error">${esc(err.message || err)}</div>`;
+}
+
+// ---------- tenants + datasets ----------
+async function loadTenants() {
+  const tenants = await (await fetch('/api/tenants')).json();
+  const sel = $('tenant');
+  sel.innerHTML = tenants.map((t) => `<option>${esc(t.tenant)}</option>`).join('');
+  const last = localStorage.getItem('tenant');
+  if (last && tenants.some((t) => t.tenant === last)) sel.value = last;
+  if (tenants.length === 0) {
+    document.querySelector('main').innerHTML = '<div class="empty">No data yet. Import something first:<br><code>venatic import week.csv -t acme</code> or <code>venatic import-zeek C:\\zeek\\logs -t acme</code></div>';
+    return;
+  }
+  sel.onchange = () => { localStorage.setItem('tenant', sel.value); loadDatasets(); };
+  await loadDatasets();
+}
+
+async function loadDatasets() {
+  state.tenant = $('tenant').value;
+  state.datasets = await api('/api/datasets');
+  const dns = state.datasets.filter((d) => d.kind === 'dns');
+  const events = state.datasets.filter((d) => d.kind === 'events');
+  // baseline defaults to the oldest, incoming to the newest
+  fillSelect($('diffFrom'), dns, (a) => a[a.length - 1].label);
+  fillSelect($('diffTo'), dns, (a) => a[0].label);
+  fillSelect($('huntDs'), events, (a) => a[0].label);
+  if (!dns.length) $('diffOut').innerHTML = '<div class="empty">no DNS datasets for this tenant yet</div>';
+  if (!events.length) $('huntOut').innerHTML = '<div class="empty">no events datasets (import Zeek logs or SIEM exports)</div>';
+}
+
+// ---------- diff ----------
+async function runDiff() {
+  const out = $('diffOut');
+  const from = $('diffFrom').value, to = $('diffTo').value;
+  if (!from || !to) return;
+  try {
+    const d = await api('/api/diff', { from, to });
+    const c = d.counts;
+    const trunc = (rows, total) => total > rows.length ? `<span class="hint">showing top ${rows.length.toLocaleString()} of ${total.toLocaleString()} (sorted by count)</span>` : '';
+    let html = `
+      <div class="chips">
+        <div class="chip new"><b>${c.added.toLocaleString()}</b><small>new</small></div>
+        <div class="chip removed"><b>${c.removed.toLocaleString()}</b><small>removed</small></div>
+        <div class="chip changed"><b>${c.changed.toLocaleString()}</b><small>changed</small></div>
+        <div class="chip unchanged"><b>${c.unchanged.toLocaleString()}</b><small>unchanged</small></div>
+      </div>
+      <div class="meta">${esc(dsMeta(d.baseline))} &rarr; ${esc(dsMeta(d.incoming))}</div>`;
+    if (c.added) {
+      html += `<h2 style="color:var(--red)">NEW hostnames (${c.added.toLocaleString()})</h2>` + trunc(d.added, c.added) + `
+        <table><tr><th>hostname</th><th style="text-align:right">queries</th></tr>
+        ${d.added.map((r) => `<tr><td>${esc(r.hostname)}</td><td class="num">${r.count ?? '-'}</td></tr>`).join('')}</table>`;
+    }
+    if (c.changed) {
+      html += `<h2 style="color:var(--yellow)">CHANGED (${c.changed.toLocaleString()})</h2>` + trunc(d.changed, c.changed) + `
+        <table><tr><th>hostname</th><th style="text-align:right">before</th><th style="text-align:right">after</th><th style="text-align:right">delta</th></tr>
+        ${d.changed.map((r) => `<tr><td>${esc(r.hostname)}</td><td class="num">${r.oldCount}</td><td class="num">${r.newCount}</td>
+          <td class="num ${r.delta > 0 ? 'up' : 'down'}">${r.delta > 0 ? '+' : ''}${r.delta.toLocaleString()}</td></tr>`).join('')}</table>`;
+    }
+    if (c.removed) {
+      html += `<details><summary>REMOVED hostnames (${c.removed.toLocaleString()})</summary>` + trunc(d.removed, c.removed) + `
+        <table><tr><th>hostname</th><th style="text-align:right">last seen queries</th></tr>
+        ${d.removed.map((r) => `<tr><td>${esc(r.hostname)}</td><td class="num">${r.count ?? '-'}</td></tr>`).join('')}</table></details>`;
+    }
+    if (!c.added && !c.removed && !c.changed) html += '<div class="empty">identical baselines - nothing to hunt here</div>';
+    out.innerHTML = html;
+  } catch (err) { showError(out, err); }
+}
+
+// ---------- hunts ----------
+let volumeChart = null;
+function huntSection(title, inner) { return `<h2>${title}</h2>${inner || '<div class="empty">no findings</div>'}`; }
+
+function renderBeaconing(rows) {
+  if (!rows.length) return '';
+  return huntSection(`Beaconing candidates (${rows.length})`, `
+    <table><tr><th>score</th><th>src &rarr; dst</th><th class="num">conns</th><th class="num">mean interval</th><th class="num">jitter</th><th class="num">interval CV</th><th class="num">size CV</th></tr>
+    ${rows.map((r) => `<tr><td>${scoreBar(r.score)}</td>
+      <td>${esc(r.src_ip)} &rarr; <b>${esc(r.dst_ip)}</b>${r.dst_port != null ? ':' + r.dst_port : ''}</td>
+      <td class="num">${r.conns}</td><td class="num">${fmtDuration(r.meanIntervalMs)}</td>
+      <td class="num">&plusmn;${fmtDuration(r.jitterMs)}</td><td class="num">${r.cv.toFixed(3)}</td>
+      <td class="num">${r.sizeCv == null ? '-' : r.sizeCv.toFixed(3)}</td></tr>`).join('')}</table>
+    <div class="hint">low CV = regular check-ins = malware C2 phoning home</div>`);
+}
+
+function renderLongConns(rows) {
+  if (!rows.length) return '';
+  return huntSection(`Long connections (${rows.length})`, `
+    <table><tr><th>duration</th><th>src &rarr; dst</th><th>proto</th><th class="num">sent</th><th class="num">recv</th></tr>
+    ${rows.map((r) => `<tr><td><b>${fmtDuration(r.durationMs)}</b></td>
+      <td>${esc(r.src_ip)} &rarr; ${esc(r.dst_ip)}${r.dst_port != null ? ':' + r.dst_port : ''}</td>
+      <td>${esc(r.proto ?? '-')}</td><td class="num">${fmtBytes(r.bytesSent)}</td><td class="num">${fmtBytes(r.bytesRecv)}</td></tr>`).join('')}</table>`);
+}
+
+function renderVolume(rows) {
+  if (!rows.length) return '';
+  return huntSection(`Top hosts by volume (${rows.length})`, `
+    <canvas id="volumeChart"></canvas>
+    <table><tr><th>host</th><th class="num">bytes</th><th class="num">conns</th><th class="num">vs median</th></tr>
+    ${rows.map((r) => `<tr><td>${esc(r.ip)}</td><td class="num">${fmtBytes(r.bytes)}</td><td class="num">${r.conns}</td>
+      <td class="num ${r.medianRatio != null && r.medianRatio >= 10 ? 'up' : ''}">${r.medianRatio == null ? '&infin;' : r.medianRatio.toFixed(1) + 'x'}</td></tr>`).join('')}</table>`);
+}
+
+function mountVolumeChart(rows) {
+  const canvas = $('volumeChart');
+  if (!canvas) return;
+  const top = rows.slice(0, 15);
+  if (volumeChart) volumeChart.destroy();
+  volumeChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: top.map((r) => r.ip),
+      datasets: [{ label: 'bytes transferred', data: top.map((r) => r.bytes), backgroundColor: '#58a6ffcc' }],
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => fmtBytes(c.raw) } } },
+      scales: { x: { ticks: { callback: (v) => fmtBytes(v) }, grid: { color: '#30363d' } }, y: { grid: { display: false } } },
+    },
+  });
+}
+
+function renderDnsTunnel(rows) {
+  if (!rows.length) return '';
+  return huntSection(`DNS tunneling / DGA candidates (${rows.length})`, `
+    <table><tr><th>score</th><th>base domain</th><th class="num">unique names</th><th class="num">queries</th><th class="num">NXDOMAIN</th><th class="num">TXT</th><th class="num">max label</th><th class="num">entropy</th></tr>
+    ${rows.map((r) => `<tr><td>${scoreBar(r.score)}</td><td><b>${esc(r.base)}</b></td>
+      <td class="num">${r.uniqueQnames.toLocaleString()}</td><td class="num">${r.conns.toLocaleString()}</td>
+      <td class="num">${(r.nxRatio * 100).toFixed(0)}%</td><td class="num">${(r.txtShare * 100).toFixed(0)}%</td>
+      <td class="num">${r.maxLabelLen}</td><td class="num">${r.avgEntropy.toFixed(2)}</td></tr>`).join('')}</table>
+    <div class="hint">many unique high-entropy subdomains under one base = DNS tunneling; NXDOMAIN floods = DGA</div>`);
+}
+
+async function runAll() {
+  const out = $('huntOut');
+  const label = $('huntDs').value;
+  if (!label) return;
+  out.innerHTML = '<div class="empty">hunting...</div>';
+  const names = ['beaconing', 'long-conns', 'volume', 'dnstunnel'];
+  try {
+    const results = await Promise.all(names.map((n) => api('/api/hunt', { name: n, label })));
+    const meta = results[0].dataset;
+    out.innerHTML = `
+      <div class="meta">${esc(dsMeta(meta))}</div>
+      ${renderBeaconing(results[0].findings)}
+      ${renderLongConns(results[1].findings)}
+      ${renderVolume(results[2].findings)}
+      ${renderDnsTunnel(results[3].findings)}
+      ${!results.some((r) => r.findings.length) ? '<div class="empty">no findings - either a quiet network or the data is too thin (try importing a longer window)</div>' : ''}`;
+    mountVolumeChart(results[2].findings);
+  } catch (err) { showError(out, err); }
+}
+
+$('runDiff').onclick = runDiff;
+$('runAll').onclick = runAll;
+loadTenants().catch((err) => showError(document.querySelector('main'), err));
+</script>
+</body>
+</html>

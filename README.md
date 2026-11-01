@@ -124,6 +124,27 @@ truncation only.
 
 CSV export columns: `type,hostname,count_baseline,count_incoming`.
 
+## Dashboard (`venatic serve`)
+
+A local web UI over the same engine - nothing leaves your machine (binds to
+127.0.0.1 only):
+
+```sh
+th serve          # opens http://127.0.0.1:8422 in your browser
+th serve --port 9000 --no-open
+```
+
+- pick a tenant, browse datasets, run DNS diffs with NEW/REMOVED/CHANGED
+  sections and top-host tables
+- run all four hunts over any events dataset; beaconing and DNS-tunnel
+  candidates get score bars, volume gets a chart of the top talkers
+- every screen is backed by the same JSON API the CLI uses (`/api/tenants`,
+  `/api/datasets`, `/api/diff`, `/api/hunt`) - pipe it into your own tooling
+  if you want
+
+Large diffs are capped at 5,000 rows per section in the UI (the CLI's
+`--csv` export has no cap).
+
 ## Tests
 
 ```sh
