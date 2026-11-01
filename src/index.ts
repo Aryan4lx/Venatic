@@ -35,8 +35,15 @@ import {
   renderVolume,
   huntDnsTunnel,
   renderDnsTunnel,
+  huntFftBeacons,
+  renderFftBeacons,
+  huntDnsClusters,
+  renderDnsClusters,
   huntHeader,
+  c,
 } from './hunts.js';
+import { trainAutoencoder, scoreHosts, renderMl } from './nn.js';
+import { runEnsemble, type EnsembleRow } from './ensemble.js';
 
 interface CommonOpts {
   db?: string;
@@ -279,7 +286,8 @@ interface HuntOpts {
 
 async function cmdHunt(name: string, o: HuntOpts): Promise<void> {
   const tenant = need(o.tenant, '--tenant <name> is required');
-  const db = openDb(resolveDbPath(o.db));
+  const dbPath = resolveDbPath(o.db);
+  const db = openDb(dbPath);
   try {
     const ds = o.label
       ? need(getDataset(db, tenant, o.label), `no dataset '${o.label}' for tenant '${tenant}' (see: th list -t ${tenant})`)
@@ -299,6 +307,12 @@ async function cmdHunt(name: string, o: HuntOpts): Promise<void> {
         renderBeaconing(findings, opts);
         break;
       }
+      case 'fft-beacons':
+        renderFftBeacons(huntFftBeacons(db, ds.id, { minConns: o.minConns ? parseInt(o.minConns, 10) : undefined, limit }), opts);
+        break;
+      case 'dns-clusters':
+        renderDnsClusters(huntDnsClusters(db, ds.id, { limit }), opts);
+        break;
       case 'long-conns': {
         const findings = huntLongConns(db, ds.id, {
           minDurationMs: o.minDuration ? parseDuration(o.minDuration) : undefined,
@@ -316,9 +330,44 @@ async function cmdHunt(name: string, o: HuntOpts): Promise<void> {
       case 'dnstunnel':
         renderDnsTunnel(huntDnsTunnel(db, ds.id, { minConns: o.minConns ? parseInt(o.minConns, 10) : undefined, limit }), opts);
         break;
+      case 'ml-anomaly':
+        renderMl(await scoreHosts(db, ds.id, dbPath, tenant, limit), opts);
+        break;
+      case 'ensemble': {
+        const { rows, notes } = await runEnsemble(db, ds.id, dbPath, tenant, limit);
+        if (o.json) return void console.log(JSON.stringify({ dataset: ds.label, rows, notes }, null, 2));
+        for (const n of notes) console.log(c('gray', `note: ${n}`));
+        console.log(`combined triage queue (all detectors, ranked):\n`);
+        for (const r of rows as EnsembleRow[]) {
+          const sev = r.score >= 70 ? c('red', String(r.score).padStart(3)) : r.score >= 40 ? c('yellow', String(r.score).padStart(3)) : c('gray', String(r.score).padStart(3));
+          console.log(`${sev}  ${r.hunt.padEnd(13)} ${r.subject}`);
+          console.log(`    ${c('gray', r.detail)}`);
+        }
+        if (!rows.length) console.log('no findings from any detector');
+        break;
+      }
       default:
         throw new Error(`unknown hunt '${name}'`);
     }
+  } finally {
+    db.close();
+  }
+}
+
+async function cmdMlTrain(o: { tenant?: string; label?: string; epochs?: string; db?: string }): Promise<void> {
+  const tenant = need(o.tenant, '--tenant <name> is required');
+  const dbPath = resolveDbPath(o.db);
+  const db = openDb(dbPath);
+  try {
+    const ds = o.label
+      ? need(getDataset(db, tenant, o.label), `no dataset '${o.label}' for tenant '${tenant}' (see: th list -t ${tenant})`)
+      : need(latestDataset(db, tenant, 'events'), `tenant '${tenant}' has no event datasets - import Zeek logs with 'th import-zeek' first`);
+    const epochs = o.epochs ? parseInt(o.epochs, 10) : 60;
+    huntHeader(db, tenant, ds.id, `ml: training autoencoder on per-host behavioral profiles`);
+    const res = await trainAutoencoder(db, ds.id, dbPath, tenant, ds.label, epochs);
+    console.log(`trained on ${res.hosts} hosts, ${res.epochs} epochs, final loss ${res.finalLoss.toFixed(4)}`);
+    console.log(`model saved: ${res.modelPath}`);
+    console.log(`score hosts with: th hunt ml-anomaly -t ${tenant}`);
   } finally {
     db.close();
   }
@@ -405,8 +454,8 @@ program
 
 program
   .command('hunt')
-  .description('run a detection hunt over an events dataset (beaconing, long-conns, volume, dnstunnel)')
-  .addArgument(new Argument('<name>', 'which hunt to run').choices(['beaconing', 'long-conns', 'volume', 'dnstunnel']))
+  .description('run a detection hunt over an events dataset (beaconing, fft-beacons, long-conns, volume, dnstunnel, dns-clusters, ml-anomaly, ensemble)')
+  .addArgument(new Argument('<name>', 'which hunt to run').choices(['beaconing', 'fft-beacons', 'long-conns', 'volume', 'dnstunnel', 'dns-clusters', 'ml-anomaly', 'ensemble']))
   .requiredOption('-t, --tenant <name>', 'tenant (customer) name')
   .option('-l, --label <name>', 'events dataset label (default: most recent events dataset)')
   .option('--json', 'print findings as JSON to stdout', false)
@@ -428,6 +477,15 @@ program
   .option('--replace', 'overwrite an existing dataset with the same label', false)
   .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
   .action((file: string, o: ImportOpts) => importSiem(file, o));
+
+program
+  .command('ml-train')
+  .description('train the per-host autoencoder on an events dataset (tensorflow.js, unsupervised)')
+  .requiredOption('-t, --tenant <name>', 'tenant (customer) name')
+  .option('-l, --label <name>', 'events dataset label (default: most recent events dataset)')
+  .option('--epochs <n>', 'training epochs', '60')
+  .option('--db <path>', 'database file (default: ~/.threathunt/threathunt.db)')
+  .action((o: { tenant?: string; label?: string; epochs?: string; db?: string }) => cmdMlTrain(o));
 
 program
   .command('list')

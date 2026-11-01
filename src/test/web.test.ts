@@ -85,7 +85,7 @@ test('GET /api/diff errors are clean 400s', async () => {
 });
 
 test('GET /api/hunt runs each hunt and resolves latest events dataset', async () => {
-  const beacon = await getJson('/api/hunt?tenant=acme&name=beaconing&min-conns=20');
+  const beacon = await getJson('/api/hunt?tenant=acme&hunt=beaconing&min-conns=20');
   assert.equal(beacon.status, 200);
   assert.equal(beacon.body.dataset.label, 'zeek-test');
   assert.ok(beacon.body.findings.length >= 1, 'planted beacon found');
@@ -94,19 +94,19 @@ test('GET /api/hunt runs each hunt and resolves latest events dataset', async ()
   assert.ok(b.cv < 0.01);
   assert.ok(b.score >= 70);
 
-  const longs = await getJson('/api/hunt?tenant=acme&name=long-conns');
+  const longs = await getJson('/api/hunt?tenant=acme&hunt=long-conns');
   assert.equal(longs.body.findings.length, 1);
   assert.equal(longs.body.findings[0].durationMs, 7200000);
 
-  const volume = await getJson('/api/hunt?tenant=acme&name=volume');
+  const volume = await getJson('/api/hunt?tenant=acme&hunt=volume');
   const hog = volume.body.findings[0];
   assert.equal(hog.ip, '10.0.0.5');
   assert.equal(hog.medianRatio, 1); // median across 2 hosts is the hog itself
 
-  const dns = await getJson('/api/hunt?tenant=acme&name=dnstunnel');
+  const dns = await getJson('/api/hunt?tenant=acme&hunt=dnstunnel');
   assert.deepEqual(dns.body.findings, []); // no dns events planted
 
-  const bad = await getJson('/api/hunt?tenant=acme&name=nonsense');
+  const bad = await getJson('/api/hunt?tenant=acme&hunt=nonsense');
   assert.equal(bad.status, 400);
   assert.match(bad.body.error, /unknown hunt/);
 });

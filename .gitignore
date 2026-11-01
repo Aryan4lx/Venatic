@@ -9,3 +9,4 @@ dist/
 
 # local sample logs - real customer data, never commit
 /samples/
+research/

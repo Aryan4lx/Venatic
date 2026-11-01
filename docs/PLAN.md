@@ -51,3 +51,27 @@ comes before Phase 3.
 - scheduled runs + "hunting book" (saved queries, annotated findings)
 - intel feeds (known-bad domains/IPs) cross-check
 - DuckDB escape hatch only if volumes demand it; SQLite aggregate-first until then
+
+## Phase 5 - ML & ensemble hunts (shipped)
+
+Techniques follow David Hoelzer's public threat-hunting material; synthesis
+and sources in `docs/ML-RESEARCH.md`.
+
+- [x] `hunt fft-beacons` - per-host/pair FFT over time-binned connection
+      counts; dominant non-DC frequency = beacon period; catches jittered
+      check-ins the interval-CV hunt misses (zero dependencies)
+- [x] `hunt dns-clusters` - DBSCAN over engineered qname features (length,
+      label entropy, digit ratio, bigram rarity) with PCA scatter in the
+      dashboard; groups "the weird" instead of listing outliers
+- [x] `ml-train` / `hunt ml-anomaly` - TensorFlow.js autoencoder on per-host
+      behavioral profiles (10 dims); flags worst-reconstruction hosts with
+      per-feature deviations; per-tenant model files; no native deps
+- [x] `hunt ensemble` - merge every detector into one ranked triage queue;
+      hosts flagged by multiple independent detectors rise to the top
+- [x] dashboard: scatter for clusters, spectrum/feature bars for ML, merged
+      ensemble queue first in "run all"
+- [ ] protocol classifier (Hoelzer's first-16-bytes model) - blocked on
+      payload capture: needs a Zeek sensor script exporting stream prefixes
+- [ ] log-line autoencoder (BPE + Conv1D on raw log lines) - needs raw-line
+      retention for SIEM imports
+- [ ] analyst feedback loop: allow-list suppressions feeding back into scores

@@ -264,23 +264,98 @@ function renderDnsTunnel(rows) {
     <div class="hint">many unique high-entropy subdomains under one base = DNS tunneling; NXDOMAIN floods = DGA</div>`);
 }
 
+function renderFftBeacons(rows) {
+  if (!rows.length) return '';
+  return huntSection(`FFT beacon candidates (${rows.length})`, `
+    <table><tr><th>score</th><th>src &rarr; dst</th><th class="num">conns</th><th class="num">period</th><th class="num">peak vs noise</th></tr>
+    ${rows.map((r) => `<tr><td>${scoreBar(r.score)}</td>
+      <td>${esc(r.src_ip)} &rarr; <b>${esc(r.dst_ip)}</b>${r.dst_port != null ? ':' + r.dst_port : ''}</td>
+      <td class="num">${r.conns}</td><td class="num">${fmtDuration(r.periodMs)}</td>
+      <td class="num">${r.peakRatio}x</td></tr>`).join('')}</table>
+    <div class="hint">spectral peak in the connection-count time series = scheduled check-in, even with jitter the interval-CV hunt misses</div>`);
+}
+
+let clusterChart = null;
+let clusterData = null;
+function renderDnsClusters(res) {
+  if (!res.clusters.length && !res.outliers.length) return '';
+  clusterData = res.scatter;
+  return huntSection(`DNS name clustering (${res.uniqueQnames.toLocaleString()} unique names &rarr; ${res.clusters.length} clusters, ${res.noise} lone outliers)`, `
+    <canvas id="clusterChart" height="110"></canvas>
+    <table><tr><th>cluster</th><th class="num">names</th><th class="num">entropy</th><th class="num">max label</th><th class="num">digits</th><th class="num">rarity</th><th>samples</th></tr>
+    ${res.clusters.map((c) => `<tr><td><b>${c.cluster}</b></td><td class="num">${c.size}</td>
+      <td class="num">${c.meanEntropy.toFixed(2)}</td><td class="num">${c.meanMaxLabel.toFixed(0)}</td>
+      <td class="num">${(c.meanDigitRatio * 100).toFixed(0)}%</td><td class="num">${c.meanRarity.toFixed(2)}</td>
+      <td class="mono">${esc(c.samples.slice(0, 3).join(', '))}</td></tr>`).join('')}</table>
+    ${res.outliers.length ? `<div class="hint">lone outliers: ${res.outliers.map((o) => esc(o.qname)).join(' &middot; ')}</div>` : ''}
+    <div class="hint">density clusters over engineered name features - the weird names land in their own small cluster (unsupervised, no baseline needed)</div>`);
+}
+
+function mountClusterChart() {
+  const canvas = $('clusterChart');
+  if (!canvas || !clusterData) return;
+  const noise = clusterData.filter((p) => p.c === -1);
+  const clustered = clusterData.filter((p) => p.c >= 0);
+  const palette = ['#f85149', '#d29922', '#3fb950', '#58a6ff', '#bc8cff', '#f778ba', '#76e3ea', '#ffa657'];
+  const datasets = [
+    { label: 'lone outliers', data: noise.map((p) => ({ x: p.x, y: p.y, q: p.q })), pointBackgroundColor: '#f85149', pointRadius: 3 },
+    { label: 'clustered', data: clustered.map((p) => ({ x: p.x, y: p.y, q: p.q, c: p.c })), pointBackgroundColor: clustered.map((p) => palette[p.c % palette.length]), pointRadius: 2.5 },
+  ];
+  if (clusterChart) clusterChart.destroy();
+  clusterChart = new Chart(canvas, {
+    type: 'scatter',
+    data: { datasets },
+    options: {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c2) => c2.raw.q } } },
+      scales: { x: { grid: { color: '#30363d' }, title: { display: true, text: 'PCA 1' } }, y: { grid: { color: '#30363d' }, title: { display: true, text: 'PCA 2' } } },
+    },
+  });
+}
+
+function renderMl(rows) {
+  if (!rows.length) return '';
+  return huntSection(`Population outliers - autoencoder (${rows.length})`, `
+    <table><tr><th>host</th><th class="num">reconstruction error</th><th>worst-fitting features (z)</th></tr>
+    ${rows.map((r) => `<tr><td><b>${esc(r.ip)}</b></td><td class="num">${r.score.toFixed(3)}</td>
+      <td>${r.topDeviations.map((d) => `${esc(d.feature)}=${d.z}`).join(', ')}</td></tr>`).join('')}</table>
+    <div class="hint">neural net trained on the tenant's own hosts; a bad reconstruction = "doesn't look like the rest of the estate" - where to look, not a verdict</div>`);
+}
+
+function renderEnsemble(res) {
+  const rows = res.rows ?? [];
+  if (!rows.length) return '';
+  return huntSection(`Ensemble triage queue (all detectors, ranked)`, `
+    <table><tr><th>score</th><th>detector</th><th>subject</th><th>why</th></tr>
+    ${rows.slice(0, 25).map((r) => `<tr><td>${scoreBar(r.score)}</td><td>${esc(r.hunt)}</td>
+      <td><b>${esc(r.subject)}</b></td><td>${esc(r.detail)}</td></tr>`).join('')}</table>`);
+}
+
 async function runAll() {
   const out = $('huntOut');
   const label = $('huntDs').value;
   if (!label) return;
   out.innerHTML = '<div class="empty">hunting...</div>';
-  const names = ['beaconing', 'long-conns', 'volume', 'dnstunnel'];
+  const names = ['beaconing', 'fft-beacons', 'long-conns', 'volume', 'dnstunnel', 'dns-clusters', 'ml-anomaly', 'ensemble'];
   try {
-    const results = await Promise.all(names.map((n) => api('/api/hunt', { name: n, label })));
-    const meta = results[0].dataset;
+    // allSettled: ml-anomaly legitimately 400s before ml-train has been run
+    const settled = await Promise.allSettled(names.map((n) => api('/api/hunt', { hunt: n, label })));
+    const get = (i) => (settled[i].status === 'fulfilled' ? settled[i].value : null);
+    const results = names.map((_, i) => get(i));
+    const meta = (results.find((r) => r) ?? { dataset: null }).dataset;
+    const mlError = settled[6].status === 'rejected' ? settled[6].reason?.message : null;
     out.innerHTML = `
-      <div class="meta">${esc(dsMeta(meta))}</div>
+      <div class="meta">${meta ? esc(dsMeta(meta)) : ''}</div>
+      ${renderEnsemble(results[7])}
       ${renderBeaconing(results[0].findings)}
-      ${renderLongConns(results[1].findings)}
-      ${renderVolume(results[2].findings)}
-      ${renderDnsTunnel(results[3].findings)}
-      ${!results.some((r) => r.findings.length) ? '<div class="empty">no findings - either a quiet network or the data is too thin (try importing a longer window)</div>' : ''}`;
-    mountVolumeChart(results[2].findings);
+      ${renderFftBeacons(results[1].findings)}
+      ${renderLongConns(results[2].findings)}
+      ${renderVolume(results[3].findings)}
+      ${renderDnsTunnel(results[4].findings)}
+      ${renderDnsClusters(results[5])}
+      ${results[6] ? renderMl(results[6].findings) : mlError ? `<h2>Population outliers - autoencoder</h2><div class="empty">${esc(mlError)}</div>` : ''}
+      ${!results.some((r, i) => i !== 7 && r && ((r.findings?.length ?? 0) || (r.clusters?.length ?? 0) || (r.rows?.length ?? 0))) ? '<div class="empty">no findings - either a quiet network or the data is too thin (try importing a longer window)</div>' : ''}`;
+    mountVolumeChart(results[3].findings);
+    mountClusterChart();
   } catch (err) { showError(out, err); }
 }
 

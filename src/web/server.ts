@@ -12,7 +12,9 @@ import {
   iterAdded, iterRemoved, iterChanged,
   type Dataset,
 } from '../store.js';
-import { huntBeaconing, huntLongConns, huntVolume, huntDnsTunnel } from '../hunts.js';
+import { huntBeaconing, huntLongConns, huntVolume, huntDnsTunnel, huntFftBeacons, huntDnsClusters } from '../hunts.js';
+import { scoreHosts } from '../nn.js';
+import { runEnsemble } from '../ensemble.js';
 import { resolveDbPath } from '../config.js';
 
 export interface ServeOpts {
@@ -82,10 +84,10 @@ function diffPayload(db: Parameters<typeof listTenants>[0], baseline: Dataset, i
   };
 }
 
-const HUNT_NAMES = ['beaconing', 'long-conns', 'volume', 'dnstunnel'] as const;
+const HUNT_NAMES = ['beaconing', 'fft-beacons', 'long-conns', 'volume', 'dnstunnel', 'dns-clusters', 'ml-anomaly', 'ensemble'] as const;
 
-function huntPayload(db: Parameters<typeof listTenants>[0], tenant: string, q: URLSearchParams): unknown {
-  const name = q.get('name') ?? '';
+async function huntPayload(db: Parameters<typeof listTenants>[0], tenant: string, q: URLSearchParams): Promise<unknown> {
+  const name = q.get('hunt') ?? '';
   if (!(HUNT_NAMES as readonly string[]).includes(name)) {
     throw new Error(`unknown hunt '${name}' (one of: ${HUNT_NAMES.join(', ')})`);
   }
@@ -99,10 +101,13 @@ function huntPayload(db: Parameters<typeof listTenants>[0], tenant: string, q: U
     if (!Number.isFinite(n) || n < 0) throw new Error(`invalid ${k}: '${v}'`);
     return n;
   };
-  let findings: unknown[];
+  let findings: unknown;
   switch (name) {
     case 'beaconing':
       findings = huntBeaconing(db, ds.id, { minConns: num('min-conns'), maxCv: num('max-cv'), minIntervalMs: num('min-interval'), limit: num('limit') });
+      break;
+    case 'fft-beacons':
+      findings = huntFftBeacons(db, ds.id, { minConns: num('min-conns'), limit: num('limit') });
       break;
     case 'long-conns':
       findings = huntLongConns(db, ds.id, { minDurationMs: num('min-duration'), limit: num('limit') });
@@ -114,15 +119,24 @@ function huntPayload(db: Parameters<typeof listTenants>[0], tenant: string, q: U
         medianRatio: Number.isFinite(x.medianRatio) ? x.medianRatio : null,
       }));
       break;
-    default: // 'dnstunnel' - name was validated above
+    case 'dns-clusters':
+      findings = huntDnsClusters(db, ds.id, { limit: num('limit') });
+      break;
+    case 'dnstunnel':
       findings = huntDnsTunnel(db, ds.id, { minConns: num('min-conns'), limit: num('limit') });
+      break;
+    case 'ml-anomaly':
+      findings = await scoreHosts(db, ds.id, resolveDbPath(q.get('db') ?? undefined), tenant, num('limit') ?? 25);
+      break;
+    default: // 'ensemble' - name was validated above
+      findings = await runEnsemble(db, ds.id, resolveDbPath(q.get('db') ?? undefined), tenant, num('limit') ?? 50);
   }
   return { dataset: { label: ds.label, imported_at: ds.imported_at, row_count: ds.row_count }, findings };
 }
 
 export async function startServe(o: ServeOpts = {}): Promise<{ port: number; close(): void; url: string }> {
   const db = openDb(resolveDbPath(o.db));
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     try {
       switch (true) {
@@ -149,7 +163,7 @@ export async function startServe(o: ServeOpts = {}): Promise<{ port: number; clo
         case url.pathname === '/api/hunt': {
           const tenant = url.searchParams.get('tenant');
           if (!tenant) throw new Error('tenant is required');
-          return sendJson(res, 200, huntPayload(db, tenant, url.searchParams));
+          return sendJson(res, 200, await huntPayload(db, tenant, url.searchParams));
         }
         default:
           return sendJson(res, 404, { error: 'not found' });

@@ -3,8 +3,9 @@
 Threat hunting for SOC teams. Import DNS query logs your analysts export as
 CSV, then diff each new export against a stored baseline to instantly see
 NEW, REMOVED, and CHANGED hostnames per customer. Import Zeek TSV logs
-(conn/dns/http) and run network hunts: beaconing, long connections, volume
-outliers, and DNS tunneling/DGA detection.
+(conn/dns/http) and SIEM CSV exports (FortiOS/IIS), and run network hunts:
+beaconing, FFT beacon detection, long connections, volume outliers, DNS
+tunneling/DGA, DNS clustering, ML host anomalies, and an ensemble ranking.
 
 Multi-tenant by design: every dataset is tagged with a tenant (customer) name
 and tenants never mix. Storage is SQLite (built into Node, no external
@@ -62,9 +63,13 @@ th import-zeek C:\zeek\logs -t acme -l zeek-jan1
 
 # run hunts over the most recent events dataset (or pick one with -l <label>)
 th hunt beaconing -t acme          # regular-interval check-ins to one host
+th hunt fft-beacons -t acme        # spectral beacon detection (survives jitter)
 th hunt long-conns -t acme         # connections open for hours (default >= 1h)
 th hunt volume -t acme             # hosts moving the most bytes, vs median
 th hunt dnstunnel -t acme          # tunneling / DGA per base domain
+th hunt dns-clusters -t acme       # cluster the weird qnames for triage
+th hunt ml-anomaly -t acme         # hosts that fit the population worst
+th hunt ensemble -t acme           # all detectors merged into one queue
 
 # every hunt supports --json and --limit, plus per-hunt tuning:
 th hunt beaconing -t acme --min-conns 10 --max-cv 0.1 --min-interval 30s
@@ -78,6 +83,25 @@ regularity (CV of gaps between connections), payload-size regularity, and
 connection count; DNS tunneling blends unique-subdomain count, label entropy,
 NXDOMAIN ratio, and TXT share (reverse-lookup `.arpa` zones are excluded).
 Always verify a candidate before escalating.
+
+## Machine learning hunts
+
+Statistical hunts (`fft-beacons`, `dns-clusters`) are pure TypeScript. The
+neural hunt (`ml-anomaly`) trains a small autoencoder on per-host behavioral
+profiles (connection counts, distinct peers/ports, byte volumes, protocol
+shares, night activity) and flags hosts the population model reconstructs
+worst, showing the features that deviate most:
+
+```sh
+th ml-train -t acme -l zeek-jan1    # ~30+ hosts needed; seconds on CPU
+th hunt ml-anomaly -t acme          # score hosts against the trained model
+```
+
+Models are per-tenant (`<db-dir>/models/<tenant>.json`) and are retrained by
+running `ml-train` again. `ensemble` merges every detector's output into one
+ranked triage queue - a host flagged by multiple independent detectors ranks
+correspondingly higher. Techniques follow David Hoelzer's public threat-
+hunting work (see `docs/ML-RESEARCH.md`).
 
 ## SIEM CSV exports (`import-siem`)
 
@@ -136,11 +160,12 @@ th serve --port 9000 --no-open
 
 - pick a tenant, browse datasets, run DNS diffs with NEW/REMOVED/CHANGED
   sections and top-host tables
-- run all four hunts over any events dataset; beaconing and DNS-tunnel
-  candidates get score bars, volume gets a chart of the top talkers
+- run all eight hunts over any events dataset; beaconing and DNS-tunnel
+  candidates get score bars, volume gets a chart of the top talkers, DNS
+  clustering gets a PCA scatter, ensemble gets one merged queue
 - every screen is backed by the same JSON API the CLI uses (`/api/tenants`,
-  `/api/datasets`, `/api/diff`, `/api/hunt`) - pipe it into your own tooling
-  if you want
+  `/api/datasets`, `/api/diff`, `/api/hunt?tenant=X&hunt=Y[&label=Z]`) - pipe
+  it into your own tooling if you want
 
 Large diffs are capped at 5,000 rows per section in the UI (the CLI's
 `--csv` export has no cap).
